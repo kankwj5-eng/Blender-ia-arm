@@ -1,0 +1,148 @@
+name: Build Blender IA ARM APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "build/overlay-v0.5/**"
+      - ".github/workflows/build-blender-ai-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NDK_VERSION: "28.2.13676358"
+      BASE_APK_URL: "https://github.com/simfeo/blender/releases/download/android-alpha-4/blender-lite.apk"
+      BASE_APK_SHA256: "5d05835e52377c7d987145b6c35a944804c88e32e114fd53ede4c36edea20ce1"
+      APKTOOL_URL: "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar"
+      APKTOOL_SHA256: "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423"
+      BLENDER_AI_KEYSTORE_PASSWORD: "android"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct Blender IA v0.5 source overlay
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p overlay-src
+          cat build/overlay-v0.5/overlay.tar.xz.b64.part-* | base64 -d > overlay.tar.xz
+          tar -xJf overlay.tar.xz -C overlay-src
+          PACKAGE_SCRIPT="$(find overlay-src -type f -path '*/build_files/android/ai/package_lite_ai.py' -print -quit)"
+          test -n "$PACKAGE_SCRIPT"
+          OVERLAY_ROOT="${PACKAGE_SCRIPT%/build_files/android/ai/package_lite_ai.py}"
+          echo "OVERLAY_ROOT=$OVERLAY_ROOT" >> "$GITHUB_ENV"
+          LLAMA_CPP_REV="$(tr -d '[:space:]' < "$OVERLAY_ROOT/build_files/android/ai/LLAMA_CPP_REVISION")"
+          test -n "$LLAMA_CPP_REV"
+          echo "LLAMA_CPP_REV=$LLAMA_CPP_REV" >> "$GITHUB_ENV"
+          echo "Overlay root: $OVERLAY_ROOT"
+          find "$OVERLAY_ROOT/build_files/android/ai" -maxdepth 1 -type f -print
+
+      - name: Verify preinstalled Android toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -d "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          test -x "${ANDROID_SDK_ROOT}/build-tools/35.0.1/zipalign"
+          test -x "${ANDROID_SDK_ROOT}/build-tools/35.0.1/apksigner"
+          test -f "${ANDROID_SDK_ROOT}/platforms/android-35/android.jar"
+          java -version
+          cmake --version
+          ninja --version
+
+      - name: Download and verify pinned APK + Apktool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p inputs
+          curl -fL --retry 4 --retry-delay 3 "$BASE_APK_URL" -o inputs/blender-lite.apk
+          echo "$BASE_APK_SHA256  inputs/blender-lite.apk" | sha256sum -c -
+          curl -fL --retry 4 --retry-delay 3 "$APKTOOL_URL" -o inputs/apktool.jar
+          echo "$APKTOOL_SHA256  inputs/apktool.jar" | sha256sum -c -
+
+      - name: Checkout pinned llama.cpp
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git llama.cpp
+          git -C llama.cpp fetch --depth=1 origin "$LLAMA_CPP_REV"
+          git -C llama.cpp checkout --detach FETCH_HEAD
+          git -C llama.cpp submodule update --init --recursive --depth=1
+
+      - name: Build llama-server Android ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          cmake -S llama.cpp -B llama-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-31 \
+            -DANDROID_STL=c++_static \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_LLAMAFILE=OFF \
+            -DGGML_RPC=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF
+          cmake --build llama-build --target llama-server --parallel 4
+          mkdir -p built
+          cp llama-build/bin/llama-server built/llama-server
+          "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded built/llama-server || true
+          chmod 755 built/llama-server
+          file built/llama-server
+          sha256sum built/llama-server
+          readelf -d built/llama-server | grep NEEDED || true
+
+      - name: Create development signing key
+        shell: bash
+        run: |
+          set -euxo pipefail
+          keytool -genkeypair \
+            -keystore debug.keystore \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Blender IA ARM,O=Development,C=NI"
+
+      - name: Repackage Blender Lite with local AI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          python3 "$OVERLAY_ROOT/build_files/android/ai/package_lite_ai.py" \
+            --base inputs/blender-lite.apk \
+            --java "$JAVA_HOME/bin/java" \
+            --apktool inputs/apktool.jar \
+            --build-tools "$ANDROID_SDK_ROOT/build-tools/35.0.1" \
+            --stage "$RUNNER_TEMP/blender-ai-stage" \
+            --output dist/Blender-IA-ARM-v0.5-local.apk \
+            --keystore debug.keystore \
+            --android-jar "$ANDROID_SDK_ROOT/platforms/android-35/android.jar" \
+            --llama-server built/llama-server
+          sha256sum dist/Blender-IA-ARM-v0.5-local.apk | tee dist/SHA256SUMS.txt
+          ls -lh dist/Blender-IA-ARM-v0.5-local.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blender-IA-ARM-v0.5-local
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
