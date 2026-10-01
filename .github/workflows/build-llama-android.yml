@@ -42,6 +42,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-31 \
+            -DANDROID_STL=c++_static \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_CPU_KLEIDIAI=ON \
             -DGGML_NATIVE=OFF \
@@ -58,11 +59,12 @@ jobs:
       - name: Build llama-server
         run: cmake --build llama-build --target llama-server --parallel
 
-      - name: Stage
+      - name: Strip and stage
         shell: bash
         run: |
           mkdir -p artifact
           cp llama-build/bin/llama-server artifact/libllama_server_bin.so
+          "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded artifact/libllama_server_bin.so
           chmod 755 artifact/libllama_server_bin.so
           sha256sum artifact/libllama_server_bin.so | tee artifact/SHA256SUMS.txt
           file artifact/libllama_server_bin.so
