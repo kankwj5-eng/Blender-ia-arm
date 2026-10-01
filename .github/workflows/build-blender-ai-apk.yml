@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          patch -d "$OVERLAY_ROOT" -p1 < build/hotfix-v0.5/adaptive-memory.patch
+          python3 build/hotfix-v0.5/apply.py "$OVERLAY_ROOT"
           grep -q "recommendedContext" "$OVERLAY_ROOT/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelRuntime.java"
           grep -q "0.5-local-llama-development" "$OVERLAY_ROOT/build_files/android/ai/package_lite_ai.py"
 
