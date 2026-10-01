@@ -25,21 +25,22 @@ edit(runtime, [
 ('c.localThreads>0?c.localThreads:Math.max(2,Runtime.getRuntime().availableProcessors()/2)', 'c.localThreads>0?c.localThreads:recommendedThreads()'),
 ])
 
-# Normalize llama.cpp memory flags even if the overlay already changed some values.
+# Normalize the complete llama.cpp launch block regardless of previous tuning.
 p = root / runtime
 s = p.read_text()
-desired = '        "--batch-size","128","--ubatch-size","64","--cache-type-k","q8_0","--cache-type-v","q8_0","--parallel","1","--jinja","--offline","--no-webui","--no-warmup","--sleep-idle-seconds","90","--api-key",apiKey);'
 rows = s.splitlines()
-found = False
-for i, line in enumerate(rows):
-    if '"--batch-size"' in line and '"--api-key"' in line:
-        rows[i] = desired
-        found = True
-        break
-if not found:
-    raise SystemExit('Hotfix base mismatch: llama.cpp option line not found')
+start_i = next((i for i,line in enumerate(rows) if 'Collections.addAll(cmd,server().getAbsolutePath()' in line), -1)
+gpu_i = next((i for i,line in enumerate(rows) if i > start_i and 'if(gpu>0)' in line), -1)
+if start_i < 0 or gpu_i < 0:
+    raise SystemExit('Hotfix base mismatch: llama.cpp launch block not found')
+canonical = [
+'      Collections.addAll(cmd,server().getAbsolutePath(),"--model",model.getAbsolutePath(),"--alias","blender-local","--host","127.0.0.1","--port",Integer.toString(PORT),',
+'        "--ctx-size",Integer.toString(context),"--threads",Integer.toString(threads),"--threads-batch",Integer.toString(threads),',
+'        "--batch-size","128","--ubatch-size","64","--cache-type-k","q8_0","--cache-type-v","q8_0","--parallel","1","--jinja","--offline","--no-webui","--no-warmup","--sleep-idle-seconds","90","--api-key",apiKey);',
+]
+rows[start_i:gpu_i] = canonical
 p.write_text('\n'.join(rows) + ('\n' if s.endswith('\n') else ''))
-print('hotfix: llama.cpp low-RAM flags')
+print('hotfix: llama.cpp low-RAM launch block')
 
 panel='build_files/android/apk/app/src/main/java/org/blender/blender/ai/AiPanel.java'
 edit(panel, [
