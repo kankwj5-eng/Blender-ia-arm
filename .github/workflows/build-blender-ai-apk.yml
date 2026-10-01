@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "build/overlay-v0.5/**"
+      - "build/hotfix-v0.5/**"
       - ".github/workflows/build-blender-ai-apk.yml"
   workflow_dispatch:
 
@@ -42,6 +43,14 @@ jobs:
           echo "LLAMA_CPP_REV=$LLAMA_CPP_REV" >> "$GITHUB_ENV"
           echo "Overlay root: $OVERLAY_ROOT"
           find "$OVERLAY_ROOT/build_files/android/ai" -maxdepth 1 -type f -print
+
+      - name: Apply v0.5 adaptive RAM hotfix
+        shell: bash
+        run: |
+          set -euxo pipefail
+          patch -d "$OVERLAY_ROOT" -p1 < build/hotfix-v0.5/adaptive-memory.patch
+          grep -q "recommendedContext" "$OVERLAY_ROOT/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelRuntime.java"
+          grep -q "0.5-local-llama-development" "$OVERLAY_ROOT/build_files/android/ai/package_lite_ai.py"
 
       - name: Verify preinstalled Android toolchain
         shell: bash
