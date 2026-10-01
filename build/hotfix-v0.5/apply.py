@@ -23,8 +23,23 @@ edit(runtime, [
 ('  public File directory(){return modelDir;}\n\n', '''  public File directory(){return modelDir;}\n\n  public long totalMemoryBytes(){\n    try{\n      ActivityManager am=(ActivityManager)activity.getSystemService(Activity.ACTIVITY_SERVICE);\n      ActivityManager.MemoryInfo info=new ActivityManager.MemoryInfo();am.getMemoryInfo(info);return info.totalMem;\n    }catch(Exception ex){return 0;}\n  }\n\n  public int recommendedContext(){\n    long gib=totalMemoryBytes()/(1024L*1024L*1024L);\n    if(gib>0&&gib<=4)return 1536;\n    if(gib<=6&&gib>0)return 2048;\n    if(gib<=8&&gib>0)return 3072;\n    return 4096;\n  }\n\n  public int recommendedThreads(){\n    int cores=Math.max(1,Runtime.getRuntime().availableProcessors());\n    if(cores<=4)return Math.max(2,cores-1);\n    return Math.min(4,Math.max(2,cores/2));\n  }\n\n  public String memoryProfile(){\n    long total=totalMemoryBytes();\n    if(total<=0)return "perfil automático";\n    return String.format(Locale.ROOT,"%.1f GB RAM · contexto recomendado %d",total/(1024.0*1024.0*1024.0),recommendedContext());\n  }\n\n'''),
 ('c.contextWindow>0?c.contextWindow:4096', 'c.contextWindow>0?c.contextWindow:recommendedContext()'),
 ('c.localThreads>0?c.localThreads:Math.max(2,Runtime.getRuntime().availableProcessors()/2)', 'c.localThreads>0?c.localThreads:recommendedThreads()'),
-('"--batch-size","256","--ubatch-size","128","--parallel","1","--jinja","--offline","--no-webui","--sleep-idle-seconds","120","--api-key",apiKey', '"--batch-size","128","--ubatch-size","64","--cache-type-k","q8_0","--cache-type-v","q8_0","--parallel","1","--jinja","--offline","--no-webui","--no-warmup","--sleep-idle-seconds","90","--api-key",apiKey'),
 ])
+
+# Normalize llama.cpp memory flags even if the overlay already changed some values.
+p = root / runtime
+s = p.read_text()
+desired = '        "--batch-size","128","--ubatch-size","64","--cache-type-k","q8_0","--cache-type-v","q8_0","--parallel","1","--jinja","--offline","--no-webui","--no-warmup","--sleep-idle-seconds","90","--api-key",apiKey);'
+rows = s.splitlines()
+found = False
+for i, line in enumerate(rows):
+    if '"--batch-size"' in line and '"--api-key"' in line:
+        rows[i] = desired
+        found = True
+        break
+if not found:
+    raise SystemExit('Hotfix base mismatch: llama.cpp option line not found')
+p.write_text('\n'.join(rows) + ('\n' if s.endswith('\n') else ''))
+print('hotfix: llama.cpp low-RAM flags')
 
 panel='build_files/android/apk/app/src/main/java/org/blender/blender/ai/AiPanel.java'
 edit(panel, [
