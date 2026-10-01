@@ -1,0 +1,131 @@
+--- a/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelRuntime.java
++++ b/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelRuntime.java
+@@ -2,6 +2,7 @@
+ package org.blender.blender.ai;
+ 
+ import android.app.Activity;
++import android.app.ActivityManager;
+ import android.content.*;
+ import android.database.Cursor;
+ import android.net.Uri;
+@@ -37,6 +38,33 @@
+ 
+   public File directory(){return modelDir;}
+ 
++  public long totalMemoryBytes(){
++    try{
++      ActivityManager am=(ActivityManager)activity.getSystemService(Activity.ACTIVITY_SERVICE);
++      ActivityManager.MemoryInfo info=new ActivityManager.MemoryInfo();am.getMemoryInfo(info);return info.totalMem;
++    }catch(Exception ex){return 0;}
++  }
++
++  public int recommendedContext(){
++    long gib=totalMemoryBytes()/(1024L*1024L*1024L);
++    if(gib>0&&gib<=4)return 1536;
++    if(gib<=6&&gib>0)return 2048;
++    if(gib<=8&&gib>0)return 3072;
++    return 4096;
++  }
++
++  public int recommendedThreads(){
++    int cores=Math.max(1,Runtime.getRuntime().availableProcessors());
++    if(cores<=4)return Math.max(2,cores-1);
++    return Math.min(4,Math.max(2,cores/2));
++  }
++
++  public String memoryProfile(){
++    long total=totalMemoryBytes();
++    if(total<=0)return "perfil automático";
++    return String.format(Locale.ROOT,"%.1f GB RAM · contexto recomendado %d",total/(1024.0*1024.0*1024.0),recommendedContext());
++  }
++
+   public List<String> models(){
+     File[] files=modelDir.listFiles((d,n)->n.toLowerCase(Locale.ROOT).endsWith(".gguf"));
+     List<String> names=new ArrayList<>();
+@@ -146,8 +174,8 @@
+ 
+   public synchronized Provider.Config prepare(Provider.Config c)throws Exception {
+     File model=model(c.localModelPath);
+-    int context=Math.max(1024,Math.min(c.localContext>0?c.localContext:(c.contextWindow>0?c.contextWindow:4096),32768));
+-    int threads=Math.max(1,Math.min(c.localThreads>0?c.localThreads:Math.max(2,Runtime.getRuntime().availableProcessors()/2),16));
++    int context=Math.max(1024,Math.min(c.localContext>0?c.localContext:(c.contextWindow>0?c.contextWindow:recommendedContext()),32768));
++    int threads=Math.max(1,Math.min(c.localThreads>0?c.localThreads:recommendedThreads(),16));
+     int gpu=Math.max(0,c.localGpuLayers);
+     boolean same=process!=null&&process.isAlive()&&runningPath.equals(model.getAbsolutePath())&&runningContext==context&&runningThreads==threads&&runningGpuLayers==gpu&&healthy();
+     if(!same){
+@@ -155,7 +183,7 @@
+       List<String> cmd=new ArrayList<>();
+       Collections.addAll(cmd,server().getAbsolutePath(),"--model",model.getAbsolutePath(),"--alias","blender-local","--host","127.0.0.1","--port",Integer.toString(PORT),
+         "--ctx-size",Integer.toString(context),"--threads",Integer.toString(threads),"--threads-batch",Integer.toString(threads),
+-        "--batch-size","256","--ubatch-size","128","--parallel","1","--jinja","--offline","--no-webui","--sleep-idle-seconds","120","--api-key",apiKey);
++        "--batch-size","128","--ubatch-size","64","--cache-type-k","q8_0","--cache-type-v","q8_0","--parallel","1","--jinja","--offline","--no-webui","--no-warmup","--sleep-idle-seconds","90","--api-key",apiKey);
+       if(gpu>0){cmd.add("--n-gpu-layers");cmd.add(Integer.toString(gpu));}
+       ProcessBuilder pb=new ProcessBuilder(cmd);pb.redirectErrorStream(true);
+       Map<String,String> env=pb.environment();env.put("HOME",activity.getFilesDir().getAbsolutePath());env.put("TMPDIR",activity.getCacheDir().getAbsolutePath());
+--- a/build_files/android/apk/app/src/main/java/org/blender/blender/ai/AiPanel.java
++++ b/build_files/android/apk/app/src/main/java/org/blender/blender/ai/AiPanel.java
+@@ -113,7 +113,7 @@
+   private String endpoint(String p){return prefs.getString(p+".endpoint",p.equals("Gemini")?"https://generativelanguage.googleapis.com/v1beta/openai/":p.equals("OpenAI")?"https://api.openai.com/v1/":p.equals("NVIDIA")?"https://integrate.api.nvidia.com/v1/":"http://127.0.0.1:8080/v1/");}
+   private Provider.Config config()throws Exception {
+     Provider.Config c=new Provider.Config();c.provider=provider;c.model=model;
+-    if(provider.equals("Modelo local")){c.localModelPath=model;c.localContext=prefs.getInt("local.context",4096);c.localThreads=prefs.getInt("local.threads",Math.max(2,Math.min(4,Runtime.getRuntime().availableProcessors()/2)));c.localGpuLayers=0;c.tools=true;c.streaming=true;c.vision=false;return c;}
++    if(provider.equals("Modelo local")){c.localModelPath=model;c.localContext=prefs.contains("local.context")?prefs.getInt("local.context",localModels.recommendedContext()):localModels.recommendedContext();c.localThreads=prefs.contains("local.threads")?prefs.getInt("local.threads",localModels.recommendedThreads()):localModels.recommendedThreads();c.localGpuLayers=0;c.tools=true;c.streaming=true;c.vision=false;return c;}
+     c.endpoint=endpoint(provider);c.key=provider.equals("Python local")?"":vault.get(provider+"|"+c.endpoint);String scope=provider+"|"+model;c.tools=prefs.getBoolean(scope+".tools",false);c.vision=prefs.getBoolean(scope+".vision",false);c.streaming=prefs.getBoolean(scope+".stream",false);return c;
+   }
+@@ -163,20 +163,21 @@
+   private void localSettings(){
+     LinearLayout form=new LinearLayout(activity);form.setOrientation(LinearLayout.VERTICAL);form.setPadding(dp(18),dp(8),dp(18),dp(8));
+     form.addView(label("llama.cpp ejecuta el GGUF dentro del teléfono. Tras descargar/importar el modelo, la inferencia funciona sin Internet ni API key.",12,Color.DKGRAY));
++    form.addView(label("Perfil automático: "+localModels.memoryProfile()+". KV cache Q8_0 para reducir RAM.",12,Color.DKGRAY));
+     List<String> installed=localModels.models();form.addView(label(installed.isEmpty()?"No hay modelos instalados.":"Modelos: "+installed.size()+" · actual: "+model,12,Color.DKGRAY));
+     TextView info=label(localModels.running()?"llama.cpp está activo":"El modelo se carga al enviar la primera orden",12,Color.DKGRAY);form.addView(info);
+     form.addView(button("Descargar modelo verificado",()->downloadCurated(info)));
+     form.addView(button("Importar otro GGUF",this::importGguf));
+-    EditText context=field("Contexto (tokens)",Integer.toString(prefs.getInt("local.context",4096)));context.setInputType(InputType.TYPE_CLASS_NUMBER);form.addView(context);
+-    int defaultThreads=Math.max(2,Math.min(4,Runtime.getRuntime().availableProcessors()/2));EditText threads=field("Hilos CPU",Integer.toString(prefs.getInt("local.threads",defaultThreads)));threads.setInputType(InputType.TYPE_CLASS_NUMBER);form.addView(threads);
++    int defaultContext=localModels.recommendedContext();EditText context=field("Contexto (tokens)",Integer.toString(prefs.contains("local.context")?prefs.getInt("local.context",defaultContext):defaultContext));context.setInputType(InputType.TYPE_CLASS_NUMBER);form.addView(context);
++    int defaultThreads=localModels.recommendedThreads();EditText threads=field("Hilos CPU",Integer.toString(prefs.contains("local.threads")?prefs.getInt("local.threads",defaultThreads):defaultThreads));threads.setInputType(InputType.TYPE_CLASS_NUMBER);form.addView(threads);
+     form.addView(button("Cargar / probar modelo",()->{
+       if(model.equals("Importa un GGUF")||model.equals("Configura GGUF")){info.setText("Descarga o importa un GGUF primero");return;}
+-      int ctx=number(context,4096,1024,32768),th=number(threads,defaultThreads,1,16);info.setText("Cargando modelo…");
++      int ctx=number(context,defaultContext,1024,32768),th=number(threads,defaultThreads,1,16);info.setText("Cargando modelo…");
+       settingsWorker.execute(()->{try{Provider.Config c=new Provider.Config();c.provider="Modelo local";c.localModelPath=model;c.localContext=ctx;c.localThreads=th;c.localGpuLayers=0;localModels.prepare(c);main.post(()->{info.setText("✓ Listo · llama.cpp responde en local");status.setText("Local · llama.cpp activo");});}catch(Exception ex){main.post(()->info.setText(ex.getMessage()==null?"No se pudo cargar":"Error: "+ex.getMessage()));}});
+     }));
+     form.addView(button("Detener modelo y liberar RAM",()->{settingsWorker.execute(()->{localModels.stop();main.post(()->{info.setText("Modelo detenido");status.setText("Local · GGUF · offline");});});}));
+     ScrollView content=new ScrollView(activity);content.addView(form);AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("Modelo local · llama.cpp").setView(content).setNegativeButton("Cancelar",null).setPositiveButton("Guardar",null).create();
+-    dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{int ctx=number(context,4096,1024,32768),th=number(threads,defaultThreads,1,16);prefs.edit().putInt("local.context",ctx).putInt("local.threads",th).remove("local.gpu").commit();dialog.dismiss();refreshModels();}));dialog.show();
++    dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{int ctx=number(context,defaultContext,1024,32768),th=number(threads,defaultThreads,1,16);prefs.edit().putInt("local.context",ctx).putInt("local.threads",th).remove("local.gpu").commit();dialog.dismiss();refreshModels();}));dialog.show();
+   }
+--- a/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelCatalog.java
++++ b/build_files/android/apk/app/src/main/java/org/blender/blender/ai/LocalModelCatalog.java
+@@ -56,7 +56,7 @@
+   private static HttpURLConnection open(String source,long offset)throws Exception {
+     URL u=new URL(source);for(int i=0;i<6;i++){
+       HttpURLConnection c=(HttpURLConnection)u.openConnection();c.setInstanceFollowRedirects(false);c.setConnectTimeout(15000);c.setReadTimeout(30000);
+-      c.setRequestProperty("User-Agent","Blender-ia-arm/0.4");c.setRequestProperty("Accept-Encoding","identity");if(offset>0)c.setRequestProperty("Range","bytes="+offset+"-");
++      c.setRequestProperty("User-Agent","Blender-ia-arm/0.5");c.setRequestProperty("Accept-Encoding","identity");if(offset>0)c.setRequestProperty("Range","bytes="+offset+"-");
+       int code=c.getResponseCode();if(code>=300&&code<400){String next=c.getHeaderField("Location");c.disconnect();if(next==null)throw new IOException("Redirección sin destino");u=new URL(u,next);continue;}return c;
+     }throw new IOException("Demasiadas redirecciones");
+   }
+--- a/build_files/android/ai/package_lite_ai.py
++++ b/build_files/android/ai/package_lite_ai.py
+@@ -51,10 +51,10 @@
+     tree = ET.parse(manifest)
+     node = tree.getroot()
+     node.set('package', 'org.blender.ai.experimental')
+-    node.set(android+'versionCode', '4')
+-    node.set(android+'versionName', '0.4-local-llama-development')
++    node.set(android+'versionCode', '5')
++    node.set(android+'versionName', '0.5-local-llama-development')
+     app = node.find('application')
+-    app.set(android+'label', 'Blender AI Lite')
++    app.set(android+'label', 'Blender IA ARM')
+     app.set(android+'allowBackup','false')
+@@ -71,7 +71,7 @@
+     llama_target.write_bytes(args.llama_server.read_bytes())
+     llama_target.chmod(0o755)
+     for activity in app.findall('activity'):
+-        activity.set(android+'label', 'Blender AI Lite')
++        activity.set(android+'label', 'Blender IA ARM')
+         # Keep the original Java class: native JNI symbols depend on it.
+         assert activity.get(android+'name') == 'org.blender.blender.BlenderActivity'
